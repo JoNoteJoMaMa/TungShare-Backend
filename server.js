@@ -22,7 +22,11 @@ const tracker = new TrackerServer({
   udp: false,
   http: true,
   ws: true,
-  stats: false
+  stats: false,
+  filter: (infoHash, params, cb) => {
+    // Allow all swarms including local development & testing
+    cb(null);
+  }
 });
 
 tracker.on('error', (err) => {
