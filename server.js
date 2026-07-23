@@ -1,11 +1,22 @@
+import http from 'http';
 import { WebSocketServer } from 'ws';
 import TrackerServer from 'bittorrent-tracker/server';
 
 const PORT = process.env.PORT || 8080;
-const TRACKER_PORT = process.env.TRACKER_PORT || 8000;
 const MAX_ROOM_CAPACITY = 100;
 
-// 1. Initialize BitTorrent WebSocket Tracker Server
+// Create unified HTTP Server for single-port cloud deployment (Render.com compatibility)
+const server = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('🚀 TungShare P2P Signaling & BitTorrent Tracker Server is Online!');
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+// 1. Initialize BitTorrent WebSocket Tracker
 const tracker = new TrackerServer({
   udp: false,
   http: true,
@@ -21,16 +32,8 @@ tracker.on('warning', (err) => {
   console.warn('[Tracker Warning]:', err.message);
 });
 
-tracker.on('listening', () => {
-  console.log(`[BitTorrent Tracker]: Online and listening on port ${TRACKER_PORT}`);
-});
-
-tracker.listen(TRACKER_PORT);
-
-// 2. Initialize WebRTC Room Signaling Server with Animal Identity & 100-User Room Limit
-const wss = new WebSocketServer({ port: PORT }, () => {
-  console.log(`[Signaling Server]: Online on port ${PORT}`);
-});
+// 2. Initialize WebRTC Signaling Server
+const wss = new WebSocketServer({ noServer: true });
 
 const rooms = new Map();
 
@@ -55,7 +58,7 @@ function broadcastRoomStatus(roomName) {
   const hasOtherPeers = uniquePeersCount > 1;
 
   room.clients.forEach((client) => {
-    if (client.readyState === 1 && client.authenticated) { // WebSocket.OPEN
+    if (client.readyState === 1 && client.authenticated) {
       client.send(JSON.stringify({
         type: 'room-status',
         peerCount: uniquePeersCount,
@@ -65,6 +68,23 @@ function broadcastRoomStatus(roomName) {
     }
   });
 }
+
+// 3. Handle Unified HTTP Upgrade for Signaling (/chat) & Tracker (/announce or default)
+server.on('upgrade', (req, socket, head) => {
+  const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+  if (urlObj.pathname.startsWith('/chat')) {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  } else if (tracker.ws) {
+    tracker.ws.handleUpgrade(req, socket, head, (ws) => {
+      tracker.ws.emit('connection', ws, req);
+    });
+  } else {
+    socket.destroy();
+  }
+});
 
 wss.on('connection', (ws, req) => {
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -266,3 +286,7 @@ function bindActiveRoomListeners(ws, roomName, peerId, isDuplicatePeer) {
     console.log(`[Signaling]: Disconnected from room [${roomName}] | Peer: ${ws.animalIcon} ${ws.animalName}`);
   });
 }
+
+server.listen(PORT, () => {
+  console.log(`[TungShare Backend]: Unified server running on port ${PORT}`);
+});
