@@ -295,6 +295,13 @@ function bindActiveRoomListeners(ws, roomName, peerId, isDuplicatePeer) {
     if (!rooms.has(roomName)) return;
     const room = rooms.get(roomName);
 
+    // Handle explicit client leave-room request for instant 0ms disconnect
+    if (data && data.type === 'leave-room') {
+      handlePeerDisconnect(ws, roomName, peerId);
+      try { ws.close(); } catch (e) {}
+      return;
+    }
+
     // Track seeder magnetURIs per peerId
     if (data && data.type === 'torrent-meta' && data.magnetURI) {
       if (!room.seederMap.has(peerId)) room.seederMap.set(peerId, new Set());
@@ -326,41 +333,47 @@ function bindActiveRoomListeners(ws, roomName, peerId, isDuplicatePeer) {
   });
 
   ws.on('close', () => {
-    if (rooms.has(roomName)) {
-      const targetRoom = rooms.get(roomName);
-      targetRoom.clients.delete(ws);
+    handlePeerDisconnect(ws, roomName, peerId);
+  });
+}
 
-      const stillHasTab = Array.from(targetRoom.clients).some(c => c.peerId === ws.peerId);
-      if (!stillHasTab) {
-        targetRoom.peerIds.delete(ws.peerId);
+function handlePeerDisconnect(ws, roomName, peerId) {
+  if (rooms.has(roomName)) {
+    const targetRoom = rooms.get(roomName);
+    if (!targetRoom.clients.has(ws)) return; // Already cleaned up
 
-        // Collect magnetURIs this peer was seeding and notify others
-        const deadMagnets = targetRoom.seederMap.has(peerId)
-          ? Array.from(targetRoom.seederMap.get(peerId))
-          : [];
-        targetRoom.seederMap.delete(peerId);
+    targetRoom.clients.delete(ws);
 
-        if (targetRoom.clients.size === 0) {
-          rooms.delete(roomName);
-          console.log(`[Signaling]: Room [${roomName}] deleted (0 active clients)`);
-        } else {
-          broadcastRoomStatus(roomName);
-          targetRoom.clients.forEach((client) => {
-            if (client.readyState === 1 && client.authenticated) {
-              client.send(JSON.stringify({
-                type: 'peer-left',
-                peerId,
-                animalName: ws.animalName,
-                animalIcon: ws.animalIcon,
-                deadMagnets // List of magnet URIs this peer was seeding (now unavailable)
-              }));
-            }
-          });
-        }
+    const stillHasTab = Array.from(targetRoom.clients).some(c => c.peerId === ws.peerId);
+    if (!stillHasTab) {
+      targetRoom.peerIds.delete(ws.peerId);
+
+      // Collect magnetURIs this peer was seeding and notify others
+      const deadMagnets = targetRoom.seederMap.has(peerId)
+        ? Array.from(targetRoom.seederMap.get(peerId))
+        : [];
+      targetRoom.seederMap.delete(peerId);
+
+      if (targetRoom.clients.size === 0) {
+        rooms.delete(roomName);
+        console.log(`[Signaling]: Room [${roomName}] deleted (0 active clients)`);
+      } else {
+        broadcastRoomStatus(roomName);
+        targetRoom.clients.forEach((client) => {
+          if (client.readyState === 1 && client.authenticated) {
+            client.send(JSON.stringify({
+              type: 'peer-left',
+              peerId,
+              animalName: ws.animalName,
+              animalIcon: ws.animalIcon,
+              deadMagnets // List of magnet URIs this peer was seeding (now unavailable)
+            }));
+          }
+        });
       }
     }
     console.log(`[Signaling]: Disconnected from room [${roomName}] | Peer: ${ws.animalIcon} ${ws.animalName}`);
-  });
+  }
 }
 
 server.listen(PORT, () => {
