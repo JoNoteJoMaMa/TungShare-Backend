@@ -4,6 +4,7 @@ import TrackerServer from 'bittorrent-tracker/server';
 
 const PORT = process.env.PORT || 8080;
 const MAX_ROOM_CAPACITY = 100;
+const MAX_HISTORY = 100; // Max messages stored per room
 
 // Create unified HTTP Server for single-port cloud deployment (Render.com compatibility)
 const server = http.createServer((req, res) => {
@@ -90,8 +91,9 @@ wss.on('connection', (ws, req) => {
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const roomName = urlObj.searchParams.get('room');
   const peerId = urlObj.searchParams.get('peerId');
-  const animalName = urlObj.searchParams.get('animalName') ? decodeURIComponent(urlObj.searchParams.get('animalName')) : 'เพื่อนสมาชิก';
-  const animalIcon = urlObj.searchParams.get('animalIcon') ? decodeURIComponent(urlObj.searchParams.get('animalIcon')) : '🐾';
+  const userId = urlObj.searchParams.get('userId') || null; // Persistent identity token
+  const requestedAnimalName = urlObj.searchParams.get('animalName') ? decodeURIComponent(urlObj.searchParams.get('animalName')) : 'เพื่อนสมาชิก';
+  const requestedAnimalIcon = urlObj.searchParams.get('animalIcon') ? decodeURIComponent(urlObj.searchParams.get('animalIcon')) : '🐾';
   const providedPassword = urlObj.searchParams.get('password');
 
   if (!roomName || !peerId) {
@@ -100,13 +102,17 @@ wss.on('connection', (ws, req) => {
   }
 
   ws.peerId = peerId;
+  ws.userId = userId;
   ws.roomName = roomName;
-  ws.animalName = animalName;
-  ws.animalIcon = animalIcon;
   ws.authenticated = false;
 
   // Case 1: Room does not exist yet -> Prompt Creator to Set Password
   if (!rooms.has(roomName)) {
+    // Resolve identity for room creator
+    const { animalName, animalIcon } = resolveIdentity(null, userId, requestedAnimalName, requestedAnimalIcon);
+    ws.animalName = animalName;
+    ws.animalIcon = animalIcon;
+
     ws.send(JSON.stringify({
       type: 'room-not-found',
       room: roomName
@@ -119,24 +125,31 @@ wss.on('connection', (ws, req) => {
       if (data.type === 'create-room') {
         const setPassword = (data.password && data.password.trim().length === 4) ? data.password.trim() : null;
         
-        rooms.set(roomName, {
+        const room = {
           clients: new Set(),
           peerIds: new Set(),
-          password: setPassword
-        });
+          password: setPassword,
+          identities: new Map(), // userId → { animalName, animalIcon }
+          seederMap: new Map(),  // peerId → Set of magnetURIs they are seeding
+        };
+        rooms.set(roomName, room);
+
+        // Save this creator's identity
+        if (userId) room.identities.set(userId, { animalName: ws.animalName, animalIcon: ws.animalIcon });
 
         ws.authenticated = true;
-        const room = rooms.get(roomName);
         room.clients.add(ws);
         room.peerIds.add(peerId);
 
         ws.send(JSON.stringify({
           type: 'room-joined',
           room: roomName,
-          hasPassword: !!setPassword
+          hasPassword: !!setPassword,
+          animalName: ws.animalName,
+          animalIcon: ws.animalIcon
         }));
 
-        console.log(`[Signaling]: Room created [${roomName}] by ${animalIcon} ${animalName}`);
+        console.log(`[Signaling]: Room created [${roomName}] by ${ws.animalIcon} ${ws.animalName}`);
         ws.removeListener('message', initHandler);
         bindActiveRoomListeners(ws, roomName, peerId, false);
       }
@@ -144,8 +157,11 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // Case 2: Room ALREADY exists -> Check Capacity Limit (Max 100 users) & Verify Password if required
+  // Case 2: Room ALREADY exists -> Resolve identity, check capacity, verify password
   const room = rooms.get(roomName);
+  const { animalName, animalIcon } = resolveIdentity(room, userId, requestedAnimalName, requestedAnimalIcon);
+  ws.animalName = animalName;
+  ws.animalIcon = animalIcon;
 
   if (room.peerIds.size >= MAX_ROOM_CAPACITY && !room.peerIds.has(peerId)) {
     ws.send(JSON.stringify({
@@ -177,7 +193,9 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify({
               type: 'room-joined',
               room: roomName,
-              hasPassword: true
+              hasPassword: true,
+              animalName: ws.animalName,
+              animalIcon: ws.animalIcon
             }));
             ws.removeListener('message', authHandler);
             completeRoomJoin(ws, roomName, peerId, room, data.password);
@@ -196,20 +214,45 @@ wss.on('connection', (ws, req) => {
     ws.send(JSON.stringify({
       type: 'room-joined',
       room: roomName,
-      hasPassword: false
+      hasPassword: false,
+      animalName: ws.animalName,
+      animalIcon: ws.animalIcon
     }));
     completeRoomJoin(ws, roomName, peerId, room, null);
   }
 });
+
+/**
+ * Resolve identity for a user joining a room.
+ * If userId is known and saved in room.identities, return saved animal.
+ * Otherwise save the requested animal and return it.
+ */
+function resolveIdentity(room, userId, requestedAnimalName, requestedAnimalIcon) {
+  if (room && userId && room.identities.has(userId)) {
+    // Return saved identity (persistent animal name)
+    return room.identities.get(userId);
+  }
+  // Use the animal the frontend generated (or default)
+  const identity = { animalName: requestedAnimalName, animalIcon: requestedAnimalIcon };
+  if (room && userId) {
+    room.identities.set(userId, identity);
+  }
+  return identity;
+}
 
 function completeRoomJoin(ws, roomName, peerId, room, password) {
   const isDuplicatePeer = room.peerIds.has(peerId);
   room.clients.add(ws);
   room.peerIds.add(peerId);
 
+  // Save identity if not already saved
+  if (ws.userId && !room.identities.has(ws.userId)) {
+    room.identities.set(ws.userId, { animalName: ws.animalName, animalIcon: ws.animalIcon });
+  }
+
   console.log(`[Signaling]: Joined room [${roomName}] (${room.peerIds.size}/${MAX_ROOM_CAPACITY}) | Peer: ${ws.animalIcon} ${ws.animalName}`);
 
-  // Notify other clients in the room that a new animal peer joined
+  // Notify other clients that a new peer joined
   room.clients.forEach((client) => {
     if (client !== ws && client.readyState === 1 && client.peerId !== ws.peerId && client.authenticated) {
       client.send(JSON.stringify({
@@ -220,6 +263,20 @@ function completeRoomJoin(ws, roomName, peerId, room, password) {
       }));
     }
   });
+
+  // Option B: Ask the oldest OTHER peer to relay history to the new joiner
+  if (!isDuplicatePeer) {
+    const existingPeers = Array.from(room.clients).filter(
+      c => c !== ws && c.peerId !== peerId && c.readyState === 1 && c.authenticated
+    );
+    if (existingPeers.length > 0) {
+      // Ask the first (oldest) existing peer to send their history to the new joiner
+      existingPeers[0].send(JSON.stringify({
+        type: 'request-history',
+        targetPeerId: peerId
+      }));
+    }
+  }
 
   broadcastRoomStatus(roomName);
   bindActiveRoomListeners(ws, roomName, peerId, isDuplicatePeer);
@@ -247,13 +304,37 @@ function bindActiveRoomListeners(ws, roomName, peerId, isDuplicatePeer) {
       return;
     }
 
-    if (rooms.has(roomName)) {
-      rooms.get(roomName).clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1 && client.peerId !== ws.peerId && client.authenticated) {
-          client.send(message.toString());
-        }
-      });
+    if (!rooms.has(roomName)) return;
+    const room = rooms.get(roomName);
+
+    // Track seeder magnetURIs per peerId
+    if (data && data.type === 'torrent-meta' && data.magnetURI) {
+      if (!room.seederMap.has(peerId)) room.seederMap.set(peerId, new Set());
+      room.seederMap.get(peerId).add(data.magnetURI);
+      // Ensure senderPeerId is in the outgoing message for client-side tracking
+      data.senderPeerId = peerId;
     }
+
+    // Unicast routing: if message has targetPeerId, send only to that peer
+    if (data && data.targetPeerId) {
+      const targetClient = Array.from(room.clients).find(
+        c => c.peerId === data.targetPeerId && c.readyState === 1 && c.authenticated
+      );
+      if (targetClient) {
+        targetClient.send(data.type === 'torrent-meta'
+          ? JSON.stringify(data)
+          : message.toString()
+        );
+      }
+      return; // Don't broadcast unicast messages
+    }
+
+    // Broadcast to all other authenticated peers
+    room.clients.forEach((client) => {
+      if (client !== ws && client.readyState === 1 && client.peerId !== ws.peerId && client.authenticated) {
+        client.send(data.type === 'torrent-meta' ? JSON.stringify(data) : message.toString());
+      }
+    });
   });
 
   ws.on('close', () => {
@@ -264,23 +345,30 @@ function bindActiveRoomListeners(ws, roomName, peerId, isDuplicatePeer) {
       const stillHasTab = Array.from(targetRoom.clients).some(c => c.peerId === ws.peerId);
       if (!stillHasTab) {
         targetRoom.peerIds.delete(ws.peerId);
-      }
 
-      if (targetRoom.clients.size === 0) {
-        rooms.delete(roomName);
-        console.log(`[Signaling]: Room [${roomName}] deleted (0 active clients)`);
-      } else {
-        broadcastRoomStatus(roomName);
-        targetRoom.clients.forEach((client) => {
-          if (client.readyState === 1 && client.authenticated) {
-            client.send(JSON.stringify({
-              type: 'peer-left',
-              peerId,
-              animalName: ws.animalName,
-              animalIcon: ws.animalIcon
-            }));
-          }
-        });
+        // Collect magnetURIs this peer was seeding and notify others
+        const deadMagnets = targetRoom.seederMap.has(peerId)
+          ? Array.from(targetRoom.seederMap.get(peerId))
+          : [];
+        targetRoom.seederMap.delete(peerId);
+
+        if (targetRoom.clients.size === 0) {
+          rooms.delete(roomName);
+          console.log(`[Signaling]: Room [${roomName}] deleted (0 active clients)`);
+        } else {
+          broadcastRoomStatus(roomName);
+          targetRoom.clients.forEach((client) => {
+            if (client.readyState === 1 && client.authenticated) {
+              client.send(JSON.stringify({
+                type: 'peer-left',
+                peerId,
+                animalName: ws.animalName,
+                animalIcon: ws.animalIcon,
+                deadMagnets // List of magnet URIs this peer was seeding (now unavailable)
+              }));
+            }
+          });
+        }
       }
     }
     console.log(`[Signaling]: Disconnected from room [${roomName}] | Peer: ${ws.animalIcon} ${ws.animalName}`);
