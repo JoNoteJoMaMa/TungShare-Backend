@@ -2,20 +2,17 @@
   "name": "TungShare-Backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "^11.9.0",
-      "onFail": "download"
-    }
-  },
+  "onlyBuiltDependencies": [
+    "node-datachannel"
+  ],
   "type": "module",
   "dependencies": {
     "bittorrent-tracker": "^11.2.3",
