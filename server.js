@@ -91,9 +91,9 @@ wss.on('connection', (ws, req) => {
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const roomName = urlObj.searchParams.get('room');
   const peerId = urlObj.searchParams.get('peerId');
-  const userId = urlObj.searchParams.get('userId') || null; // Persistent identity token
-  const requestedAnimalName = urlObj.searchParams.get('animalName') ? decodeURIComponent(urlObj.searchParams.get('animalName')) : 'เพื่อนสมาชิก';
-  const requestedAnimalIcon = urlObj.searchParams.get('animalIcon') ? decodeURIComponent(urlObj.searchParams.get('animalIcon')) : '🐾';
+  // animalName and animalIcon are resolved client-side from localStorage (no server identity storage)
+  const animalName = urlObj.searchParams.get('animalName') ? decodeURIComponent(urlObj.searchParams.get('animalName')) : 'เพื่อนสมาชิก';
+  const animalIcon = urlObj.searchParams.get('animalIcon') ? decodeURIComponent(urlObj.searchParams.get('animalIcon')) : '🐾';
   const providedPassword = urlObj.searchParams.get('password');
 
   if (!roomName || !peerId) {
@@ -102,17 +102,13 @@ wss.on('connection', (ws, req) => {
   }
 
   ws.peerId = peerId;
-  ws.userId = userId;
   ws.roomName = roomName;
+  ws.animalName = animalName;
+  ws.animalIcon = animalIcon;
   ws.authenticated = false;
 
   // Case 1: Room does not exist yet -> Prompt Creator to Set Password
   if (!rooms.has(roomName)) {
-    // Resolve identity for room creator
-    const { animalName, animalIcon } = resolveIdentity(null, userId, requestedAnimalName, requestedAnimalIcon);
-    ws.animalName = animalName;
-    ws.animalIcon = animalIcon;
-
     ws.send(JSON.stringify({
       type: 'room-not-found',
       room: roomName
@@ -129,13 +125,9 @@ wss.on('connection', (ws, req) => {
           clients: new Set(),
           peerIds: new Set(),
           password: setPassword,
-          identities: new Map(), // userId → { animalName, animalIcon }
           seederMap: new Map(),  // peerId → Set of magnetURIs they are seeding
         };
         rooms.set(roomName, room);
-
-        // Save this creator's identity
-        if (userId) room.identities.set(userId, { animalName: ws.animalName, animalIcon: ws.animalIcon });
 
         ws.authenticated = true;
         room.clients.add(ws);
@@ -144,9 +136,7 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({
           type: 'room-joined',
           room: roomName,
-          hasPassword: !!setPassword,
-          animalName: ws.animalName,
-          animalIcon: ws.animalIcon
+          hasPassword: !!setPassword
         }));
 
         console.log(`[Signaling]: Room created [${roomName}] by ${ws.animalIcon} ${ws.animalName}`);
@@ -157,11 +147,8 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // Case 2: Room ALREADY exists -> Resolve identity, check capacity, verify password
+  // Case 2: Room ALREADY exists -> check capacity & verify password
   const room = rooms.get(roomName);
-  const { animalName, animalIcon } = resolveIdentity(room, userId, requestedAnimalName, requestedAnimalIcon);
-  ws.animalName = animalName;
-  ws.animalIcon = animalIcon;
 
   if (room.peerIds.size >= MAX_ROOM_CAPACITY && !room.peerIds.has(peerId)) {
     ws.send(JSON.stringify({
@@ -190,15 +177,13 @@ wss.on('connection', (ws, req) => {
         if (data.type === 'auth-submit') {
           if (data.password === room.password) {
             ws.authenticated = true;
-            ws.send(JSON.stringify({
-              type: 'room-joined',
-              room: roomName,
-              hasPassword: true,
-              animalName: ws.animalName,
-              animalIcon: ws.animalIcon
-            }));
-            ws.removeListener('message', authHandler);
-            completeRoomJoin(ws, roomName, peerId, room, data.password);
+      ws.send(JSON.stringify({
+        type: 'room-joined',
+        room: roomName,
+        hasPassword: true
+      }));
+      ws.removeListener('message', authHandler);
+      completeRoomJoin(ws, roomName, peerId, room, data.password);
           } else {
             ws.send(JSON.stringify({
               type: 'auth-failed',
@@ -214,31 +199,11 @@ wss.on('connection', (ws, req) => {
     ws.send(JSON.stringify({
       type: 'room-joined',
       room: roomName,
-      hasPassword: false,
-      animalName: ws.animalName,
-      animalIcon: ws.animalIcon
+      hasPassword: false
     }));
     completeRoomJoin(ws, roomName, peerId, room, null);
   }
 });
-
-/**
- * Resolve identity for a user joining a room.
- * If userId is known and saved in room.identities, return saved animal.
- * Otherwise save the requested animal and return it.
- */
-function resolveIdentity(room, userId, requestedAnimalName, requestedAnimalIcon) {
-  if (room && userId && room.identities.has(userId)) {
-    // Return saved identity (persistent animal name)
-    return room.identities.get(userId);
-  }
-  // Use the animal the frontend generated (or default)
-  const identity = { animalName: requestedAnimalName, animalIcon: requestedAnimalIcon };
-  if (room && userId) {
-    room.identities.set(userId, identity);
-  }
-  return identity;
-}
 
 function completeRoomJoin(ws, roomName, peerId, room, password) {
   const isDuplicatePeer = room.peerIds.has(peerId);
