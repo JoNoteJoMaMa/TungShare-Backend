@@ -36,6 +36,29 @@ tracker.on('warning', (err) => {
 // 2. Initialize WebRTC Signaling Server
 const wss = new WebSocketServer({ noServer: true });
 
+// ─── Heartbeat: detect dead connections within 10-20s instead of 30-90s TCP timeout ───
+const HEARTBEAT_INTERVAL_MS = 10_000;
+
+wss.on('connection', (ws) => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; }); // Browser responds to ping automatically
+});
+
+const heartbeat = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) {
+      // No pong since last ping — connection is dead, terminate immediately
+      ws.terminate();
+      return;
+    }
+    ws.isAlive = false; // reset flag; expect pong before next interval
+    try { ws.ping(); } catch (e) {} // send protocol-level ping
+  });
+}, HEARTBEAT_INTERVAL_MS);
+
+// Clean up heartbeat when server closes
+wss.on('close', () => clearInterval(heartbeat));
+
 const rooms = new Map();
 
 function broadcastRoomStatus(roomName) {
